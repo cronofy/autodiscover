@@ -31,6 +31,8 @@ module Autodiscover
   # Client objects are used to make queries to the autodiscover server, to
   # specify configuration values, and to maintain state between requests.
   class Client
+    include Hatchet
+
     # Creates a Client object.
     #
     # The following options can be specified:
@@ -39,7 +41,7 @@ module Autodiscover
     #                              a connection. The default value is 10 seconds.
     # <tt>:debug_dev</tt>::        Device that debug messages and all HTTP
     #                              requests and responses are dumped to. The debug
-    #                              device must respond to <tt><<</tt> for dump. 
+    #                              device must respond to <tt><<</tt> for dump.
     def initialize(options={})
       @debug_dev = options[:debug_dev]
 
@@ -56,11 +58,13 @@ module Autodiscover
     def get_services(credentials, reset_redirect_count=true)
       @redirect_count = 0 if reset_redirect_count
 
-      req_body = build_request_body credentials.email
+      log.ndc.scope(credentials.email) do
+        req_body = build_request_body credentials.email
 
-      try_standard_secure_urls(credentials, req_body) ||
-      try_standard_redirection_url(credentials, req_body) ||
-      try_dns_serv_record
+        try_standard_secure_urls(credentials, req_body) ||
+        try_standard_redirection_url(credentials, req_body) ||
+        try_dns_serv_record
+      end
     end
 
     private
@@ -70,6 +74,7 @@ module Autodiscover
       [ "https://#{credentials.smtp_domain}/autodiscover/autodiscover.xml",
         "https://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
       ].each do |url|
+        log.info { "Trying standard secure URL=#{url}" }
         @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
         response = try_secure_url(url, credentials, req_body)
         break if response
@@ -79,9 +84,18 @@ module Autodiscover
 
     def try_standard_redirection_url(credentials, req_body)
       url = "http://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
+
+      log.info { "Trying standard redirection URL=#{url}" }
       @debug_dev << "AUTODISCOVER: looking for redirect from #{url}\n" if @debug_dev
+
       response = @http.get(url) rescue nil
-      return nil unless response
+
+      unless response
+        log.info { "No response received from #{url}" }
+        return nil
+      end
+
+      log.info { "Status code #{response.status_code} from #{url} - Location=#{response.header['Location'].first}" }
 
       if response.status_code == 302
         try_redirect_url(response.header['Location'].first, credentials, req_body)
@@ -91,29 +105,43 @@ module Autodiscover
     end
 
     def try_secure_url(url, credentials, req_body)
-      @http.set_auth(url, credentials.email, credentials.password)
+      log.info { "Trying secure URL=#{url}" }
 
+      @http.set_auth(url, credentials.email, credentials.password)
       response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'}) rescue nil
-      return nil unless response
+
+      unless response
+        log.info { "No response received from #{url}" }
+        return nil
+      end
+
+      log.info { "Status code #{response.status_code} from #{url}" }
 
       if response.status_code == 302
         try_redirect_url(response.header['Location'].first, credentials, req_body)
       elsif HTTP::Status.successful?(response.status_code)
         result = parse_response(response.content)
+
         case result
-          when Autodiscover::Services
-            return result
-          when Autodiscover::RedirectUrl
-            try_redirect_url(result.url, credentials, req_body)
-          when Autodiscover::RedirectAddress
-            begin
-              credentials.email = result.address
-            rescue ArgumentError
-              # An invalid email address was returned
-              return nil
-            end
-            
-            try_redirect_addr(credentials)
+        when Autodiscover::Services
+          log.info { "Found services from #{url} - #{result}" }
+          result
+
+        when Autodiscover::RedirectUrl
+          try_redirect_url(result.url, credentials, req_body)
+
+        when Autodiscover::RedirectAddress
+          begin
+            credentials.email = result.address
+          rescue ArgumentError
+            log.info { "Invalid email address response from #{url} - address=#{result.address}" }
+            return nil
+          end
+
+          try_redirect_addr(credentials)
+        else
+          log.info { "Did not recognise response from #{url} of #{result.class}" }
+          nil
         end
       else
         nil
@@ -121,27 +149,44 @@ module Autodiscover
     end
 
     def try_redirect_url(url, credentials, req_body)
-      @redirect_count += 1
-      return nil if @redirect_count > REDIRECT_LIMIT
+      log.info { "Trying redirect URL - #{url}" }
 
-      # Only permit redirects to secure addresses
-      return nil unless url =~ /^https:/i
-      try_secure_url(url, credentials, req_body)
+      @redirect_count += 1
+
+      if @redirect_count > REDIRECT_LIMIT
+        log.info { "Redirect limit exceeded - redirect_count=#{@redirect_count}" }
+        return nil
+      end
+
+      if url =~ /^https:/i
+        # Only permit redirects to secure addresses
+        try_secure_url(url, credentials, req_body)
+      else
+        log.info { "Ignoring unsecure URL #{url}" }
+        nil
+      end
     end
 
     def try_redirect_addr(credentials)
+      log.info { "Trying redirected email=#{credentials.email}" }
+
       @redirect_count += 1
-      return nil if @redirect_count > REDIRECT_LIMIT
+
+      if @redirect_count > REDIRECT_LIMIT
+        log.info { "Redirect limit exceeded - redirect_count=#{@redirect_count}" }
+        return nil
+      end
 
       get_services(credentials, false)
     end
 
     def try_dns_serv_record
+      log.info { "No-op #try_dns_serv_record" }
       nil
     end
 
     def build_request_body(email)
-      Nokogiri::XML::Builder.new do |xml| 
+      Nokogiri::XML::Builder.new do |xml|
         xml.Autodiscover('xmlns' => 'http://schemas.microsoft.com/exchange/autodiscover/outlook/requestschema/2006') {
           xml.Request {
             xml.EMailAddress email
@@ -153,51 +198,68 @@ module Autodiscover
 
     NAMESPACES = {
       'a' => 'http://schemas.microsoft.com/exchange/autodiscover/responseschema/2006',
-      'o' => 'http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a'        
+      'o' => 'http://schemas.microsoft.com/exchange/autodiscover/outlook/responseschema/2006a'
     }  #:nodoc:
 
     def parse_response(body)
       doc = parse_xml body
-      return nil unless doc
+
+      unless doc
+        log.info { "No document extracted from body" }
+        return nil
+      end
 
       # The response must include an Account element. Return an error if not found.
       account_e = doc.at_xpath('a:Autodiscover/o:Response/o:Account', NAMESPACES)
-      return nil unless account_e
+      unless account_e
+        log.info { "No account element found within document" }
+        return nil
+      end
+
+      log.info { "Account element contents = #{account_e}" }
 
       # The response must include an Action element. Return an error if not found.
       action_e = account_e.at_xpath('o:Action', NAMESPACES)
-      return nil unless action_e
+      unless action_e
+        log.info { "No action email found within account" }
+        return nil
+      end
 
       case action_e.content
-        when /^settings$/i
-          # Response contains configuration settings in <Protocol> elements
-          # Only care about about "EXPR" type protocol configuration values
-          # for accessing Exchange services outside of the firewall
-          settings = {}
-          if protocol_e = account_e.at_xpath('o:Protocol[o:Type="EXPR"]', NAMESPACES)
-            # URL for the Web services virtual directory.
-            ews_url_e = protocol_e.at_xpath('o:EwsUrl', NAMESPACES)
-            settings['ews_url'] = ews_url_e.content if ews_url_e
-            # Time to Live (TTL) in hours. Default is 1 hour if no element is
-            # returned.
-            ttl_e = protocol_e.at_xpath('o:TTL', NAMESPACES)
-            settings['ttl'] = ttl_e ? ttl_e.content : 1
-          end
-          Autodiscover::Services.new(settings)
-        when /^redirectAddr$/i
-          # Response contains a new address that must be used to re-­Autodiscover
-          redirect_addr_e = account_e.at_xpath('o:RedirectAddr', NAMESPACES)
-          address = redirect_addr_e ? redirect_addr_e.content : nil
-          return nil unless address
-          Autodiscover::RedirectAddress.new(address)
-        when /^redirectUrl$/i
-          # Response contains a new URL that must be used to re-Autodiscover
-          redirect_url_e = account_e.at_xpath('o:RedirectUrl', NAMESPACES)
-          url = redirect_url_e ? redirect_url_e.content : nil
-          return nil unless url
-          Autodiscover::RedirectUrl.new(url)          
-        else
-          nil
+      when /^settings$/i
+        log.info { "settings action content - #{action_e}" }
+        # Response contains configuration settings in <Protocol> elements
+        # Only care about about "EXPR" type protocol configuration values
+        # for accessing Exchange services outside of the firewall
+        settings = {}
+        if protocol_e = account_e.at_xpath('o:Protocol[o:Type="EXPR"]', NAMESPACES)
+          log.info { "protocol settings found - #{protocol_e}" }
+          # URL for the Web services virtual directory.
+          ews_url_e = protocol_e.at_xpath('o:EwsUrl', NAMESPACES)
+          settings['ews_url'] = ews_url_e.content if ews_url_e
+          # Time to Live (TTL) in hours. Default is 1 hour if no element is
+          # returned.
+          ttl_e = protocol_e.at_xpath('o:TTL', NAMESPACES)
+          settings['ttl'] = ttl_e ? ttl_e.content : 1
+        end
+        Autodiscover::Services.new(settings)
+      when /^redirectAddr$/i
+        log.info { "redirectAddr action content - #{action_e}" }
+        # Response contains a new address that must be used to re-­Autodiscover
+        redirect_addr_e = account_e.at_xpath('o:RedirectAddr', NAMESPACES)
+        address = redirect_addr_e ? redirect_addr_e.content : nil
+        return nil unless address
+        Autodiscover::RedirectAddress.new(address)
+      when /^redirectUrl$/i
+        log.info { "redirectUrl action content - #{action_e}" }
+        # Response contains a new URL that must be used to re-Autodiscover
+        redirect_url_e = account_e.at_xpath('o:RedirectUrl', NAMESPACES)
+        url = redirect_url_e ? redirect_url_e.content : nil
+        return nil unless url
+        Autodiscover::RedirectUrl.new(url)
+      else
+        log.info { "Unhandled action content - #{action_e}" }
+        nil
       end
     end
 

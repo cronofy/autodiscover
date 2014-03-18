@@ -36,5 +36,9 @@ module Autodiscover
       @ews_url = settings['ews_url']
       @ttl = settings['ttl']
     end
+
+    def to_s
+      "<#{self.class} - ews_url=#{ews_url}, ttl=#{ttl}>"
+    end
   end
 end
