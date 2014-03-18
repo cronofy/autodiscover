@@ -23,6 +23,7 @@
 
 require 'httpclient'
 require 'nokogiri'
+require 'hatchet'
 
 module Autodiscover
   REDIRECT_LIMIT = 10  # attempts
