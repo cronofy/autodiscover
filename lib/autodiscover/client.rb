@@ -117,6 +117,8 @@ module Autodiscover
       end
 
       log.info { "Status code #{response.status_code} from #{url}" }
+      log.debug { response.header.all.inspect }
+      log.debug { response.content }
 
       if response.status_code == 302
         try_redirect_url(response.header['Location'].first, credentials, req_body)
