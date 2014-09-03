@@ -64,7 +64,7 @@ module Autodiscover
 
         try_standard_secure_urls(credentials, req_body) ||
         try_standard_redirection_url(credentials, req_body) ||
-        try_dns_serv_record
+        try_dns_serv_records(credentials, req_body)
       end
     end
 
@@ -85,8 +85,11 @@ module Autodiscover
 
     def try_standard_redirection_url(credentials, req_body)
       url = "http://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
+      try_redirection_url(url, credentials, req_body)
+    end
 
-      log.info { "Trying standard redirection URL=#{url}" }
+    def try_redirection_url(url, credentials, req_body)
+      log.info { "Trying redirection URL=#{url}" }
       @debug_dev << "AUTODISCOVER: looking for redirect from #{url}\n" if @debug_dev
 
       response = @http.get(url) rescue nil
@@ -183,9 +186,77 @@ module Autodiscover
       get_services(credentials, false)
     end
 
-    def try_dns_serv_record
-      log.info { "No-op #try_dns_serv_record" }
-      nil
+    SrvRecord = Struct.new(:priority, :weight, :port, :target) do
+      HTTP_PORT_NUMBER = 80
+      HTTPS_PORT_NUMBER = 443
+
+      def self.parse(record)
+        parts = record.split(' ')
+        self.new(parts[1].to_i, parts[2].to_i, parts[3].to_i, parts[4].sub(/\.\Z/, ''))
+      end
+
+      def http?
+        self.port == HTTP_PORT_NUMBER
+      end
+
+      def https?
+        self.port == HTTPS_PORT_NUMBER
+      end
+
+      def <=>(other)
+        self.sort_attributes <=> other.sort_attributes
+      end
+
+      def sort_attributes
+        [self.port_priority, self.priority, -self.weight]
+      end
+
+      def port_priority
+        if https?
+          0
+        else
+          1
+        end
+      end
+    end
+
+    def try_dns_serv_records(credentials, req_body)
+      log.info { "Entering #try_dns_serv_records" }
+
+      require 'ostruct'
+
+      output =
+        begin
+          `dig +trace +short -t srv _autodiscover._tcp.#{credentials.smtp_domain}`
+        rescue => e
+          log.warn "Error in #try_dns_serv_records smtp_domain=#{credentials.smtp_domain} - #{e.message}", e
+          ''
+        end
+
+      srv_records = output.split("\n")
+        .map(&:strip)
+        .select { |line| line =~ /\ASRV/ }
+        .map    { |line| SrvRecord.parse(line) }
+        .each   { |srv| log.info { "Found #{srv.inspect}" } }
+        .select { |srv| srv.https? or srv.http? }
+        .sort
+
+      response = nil
+      srv_records.each do |srv|
+        log.info { "Trying SRV #{srv.inspect}" }
+
+        if srv.https?
+          url = "https://#{srv.target}/autodiscover/autodiscover.xml"
+          @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
+          response = try_secure_url(url, credentials, req_body)
+        else
+          url = "http://#{srv.target}/autodiscover/autodiscover.xml"
+          response = try_redirection_url(url, credentials, req_body)
+        end
+
+        break if response
+      end
+      response
     end
 
     def build_request_body(email)
