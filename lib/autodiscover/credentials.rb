@@ -40,12 +40,16 @@ module Autodiscover
     end
 
     def email=(address)  #:nodoc:
+      set_domain_from_address(address)
+      @email = address
+    end
+
+    def set_domain_from_address(address)
       raise ArgumentError, "No email address specified" unless address
       @smtp_domain = address[/^.+@(.*)$/, 1]
       unless @smtp_domain =~ /.+\..+/
         raise ArgumentError, "Invalid email address: #{address}"
       end
-      @email = address
     end
   end
 end

@@ -138,7 +138,7 @@ module Autodiscover
 
         when Autodiscover::RedirectAddress
           begin
-            credentials.email = result.address
+            credentials.set_domain_from_address(result.address)
           rescue ArgumentError
             log.info { "Invalid email address response from #{url} - address=#{result.address}" }
             return nil
