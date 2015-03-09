@@ -111,8 +111,12 @@ module Autodiscover
     def try_secure_url(url, credentials, req_body)
       log.info { "Trying secure URL=#{url}" }
 
-      @http.set_auth(url, credentials.email, credentials.password)
-      response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'}) rescue nil
+      begin
+        @http.set_auth(url, credentials.email, credentials.password)
+        response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'})
+      rescue => e
+        log.info { "Failed trying secure URL=#{url} - #{e.class} - #{e.message}" }
+      end
 
       unless response
         log.info { "No response received from #{url}" }
