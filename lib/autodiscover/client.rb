@@ -34,6 +34,14 @@ module Autodiscover
   class Client
     include Hatchet
 
+    class NilTracer
+      def call(message)
+        yield if block_given?
+      end
+    end
+
+    DEFAULT_TRACER = NilTracer.new
+
     # Creates a Client object.
     #
     # The following options can be specified:
@@ -50,6 +58,8 @@ module Autodiscover
       @http.connect_timeout = options[:connect_timeout] || CONNECT_TIMEOUT_DEFAULT
       @http.debug_dev = @debug_dev if @debug_dev
 
+      @tracer = options.fetch(:tracer, DEFAULT_TRACER)
+
       @redirect_count = 0
     end
 
@@ -60,42 +70,50 @@ module Autodiscover
       @redirect_count = 0 if reset_redirect_count
 
       log.ndc.scope(credentials.email) do
-        req_body = build_request_body credentials.email
+        @tracer.call("Discovering EWS URL for #{credentials.email}") do
+          req_body = build_request_body credentials.email
 
-        try_standard_secure_urls(credentials, req_body) ||
-        try_standard_redirection_url(credentials, req_body) ||
-        try_dns_serv_records(credentials, req_body)
+          try_standard_secure_urls(credentials, req_body) ||
+          try_standard_redirection_url(credentials, req_body) ||
+          try_dns_serv_records(credentials, req_body)
+        end
       end
     end
 
     private
 
     def try_standard_secure_urls(credentials, req_body)
-      response = nil
-      [ "https://#{credentials.smtp_domain}/autodiscover/autodiscover.xml",
-        "https://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
-      ].each do |url|
-        log.info { "Trying standard secure URL=#{url}" }
-        @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
-        response = try_secure_url(url, credentials, req_body)
-        break if response
+      @tracer.call("Trying standard secure URLs") do
+        response = nil
+        [ "https://#{credentials.smtp_domain}/autodiscover/autodiscover.xml",
+          "https://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
+        ].each do |url|
+          log.info { "Trying standard secure URL=#{url}" }
+          @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
+          response = try_secure_url(url, credentials, req_body)
+          break if response
+        end
+        response
       end
-      response
     end
 
     def try_standard_redirection_url(credentials, req_body)
-      url = "http://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
-      try_redirection_url(url, credentials, req_body)
+      @tracer.call("Trying standard redirection URLs") do
+        url = "http://autodiscover.#{credentials.smtp_domain}/autodiscover/autodiscover.xml"
+        try_redirection_url(url, credentials, req_body)
+      end
     end
 
     def try_redirection_url(url, credentials, req_body)
       log.info { "Trying redirection URL=#{url}" }
+      @tracer.call("Trying redirection URL #{url}")
       @debug_dev << "AUTODISCOVER: looking for redirect from #{url}\n" if @debug_dev
 
       response = @http.get(url) rescue nil
 
       unless response
         log.info { "No response received from #{url}" }
+        @tracer.call("No response received from redirection URL #{url}")
         return nil
       end
 
@@ -104,6 +122,7 @@ module Autodiscover
       if response.status_code == 302
         try_redirect_url(response.header['Location'].first, credentials, req_body)
       else
+        @tracer.call("No redirect for URL #{url}")
         nil
       end
     end
@@ -112,6 +131,7 @@ module Autodiscover
       log.info { "Trying secure URL=#{url}" }
 
       begin
+        @tracer.call("Trying #{url}")
         @http.set_auth(url, credentials.email, credentials.password)
         response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'})
       rescue => e
@@ -119,6 +139,7 @@ module Autodiscover
       end
 
       unless response
+        @tracer.call("No response received from #{url}")
         log.info { "No response received from #{url}" }
         return nil
       end
@@ -135,6 +156,7 @@ module Autodiscover
         case result
         when Autodiscover::Services
           log.info { "Found services from #{url} - #{result}" }
+          @tracer.call("Found services from #{url}")
           result
 
         when Autodiscover::RedirectUrl
@@ -145,15 +167,18 @@ module Autodiscover
             credentials.set_domain_from_address(result.address)
           rescue ArgumentError
             log.info { "Invalid email address response from #{url} - address=#{result.address}" }
+            @tracer.call("Invalid email address response from #{url} - address=#{result.address}")
             return nil
           end
 
           try_redirect_addr(credentials)
         else
           log.info { "Did not recognise response from #{url} of #{result.class}" }
+          @tracer.call("Did not recognize response from #{url}")
           nil
         end
       else
+        @tracer.call("Failed (status: #{response.status_code})")
         nil
       end
     end
@@ -165,13 +190,17 @@ module Autodiscover
 
       if @redirect_count > REDIRECT_LIMIT
         log.info { "Redirect limit exceeded - redirect_count=#{@redirect_count}" }
+        @tracer.call("Redirect limit exceeded, ignoring redirect to URL #{url}")
         return nil
       end
 
       if url =~ /^https:/i
-        # Only permit redirects to secure addresses
-        try_secure_url(url, credentials, req_body)
+        @tracer.call("Following redirect to #{url}") do
+          # Only permit redirects to secure addresses
+          try_secure_url(url, credentials, req_body)
+        end
       else
+        @tracer.call("Ignoring redirect to unsecure URL #{url}")
         log.info { "Ignoring unsecure URL #{url}" }
         nil
       end
@@ -184,9 +213,11 @@ module Autodiscover
 
       if @redirect_count > REDIRECT_LIMIT
         log.info { "Redirect limit exceeded - redirect_count=#{@redirect_count}" }
+        @tracer.call("Redirect limit exceeded, ignoring redirect to email #{credentials.email}")
         return nil
       end
 
+      @tracer.call("Trying redirected email #{credentials.email}")
       get_services(credentials, false)
     end
 
@@ -227,40 +258,48 @@ module Autodiscover
     def try_dns_serv_records(credentials, req_body)
       log.info { "Entering #try_dns_serv_records" }
 
-      require 'ostruct'
+      @tracer.call("Trying DNS records for #{credentials.smtp_domain}") do
+        require 'ostruct'
 
-      output =
-        begin
-          `dig +trace +short -t srv _autodiscover._tcp.#{credentials.smtp_domain}`
-        rescue => e
-          log.warn "Error in #try_dns_serv_records smtp_domain=#{credentials.smtp_domain} - #{e.message}", e
-          ''
+        output =
+          begin
+            `dig +trace +short -t srv _autodiscover._tcp.#{credentials.smtp_domain}`
+          rescue => e
+            log.warn "Error in #try_dns_serv_records smtp_domain=#{credentials.smtp_domain} - #{e.message}", e
+            ''
+          end
+
+        srv_records = output.split("\n")
+          .map(&:strip)
+          .select { |line| line =~ /\ASRV/ }
+          .map    { |line| SrvRecord.parse(line) }
+          .each   { |srv| log.info { "Found #{srv.inspect}" } }
+          .select { |srv| srv.https? or srv.http? }
+          .sort
+
+        response = nil
+
+        if srv_records.empty?
+          @tracer.call("No DNS records found for #{credentials.smtp_domain}")
         end
 
-      srv_records = output.split("\n")
-        .map(&:strip)
-        .select { |line| line =~ /\ASRV/ }
-        .map    { |line| SrvRecord.parse(line) }
-        .each   { |srv| log.info { "Found #{srv.inspect}" } }
-        .select { |srv| srv.https? or srv.http? }
-        .sort
+        srv_records.each do |srv|
+          log.info { "Trying SRV #{srv.inspect}" }
+          @tracer.call("Trying SRV DNS record for #{srv.target}")
 
-      response = nil
-      srv_records.each do |srv|
-        log.info { "Trying SRV #{srv.inspect}" }
+          if srv.https?
+            url = "https://#{srv.target}/autodiscover/autodiscover.xml"
+            @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
+            response = try_secure_url(url, credentials, req_body)
+          else
+            url = "http://#{srv.target}/autodiscover/autodiscover.xml"
+            response = try_redirection_url(url, credentials, req_body)
+          end
 
-        if srv.https?
-          url = "https://#{srv.target}/autodiscover/autodiscover.xml"
-          @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
-          response = try_secure_url(url, credentials, req_body)
-        else
-          url = "http://#{srv.target}/autodiscover/autodiscover.xml"
-          response = try_redirection_url(url, credentials, req_body)
+          break if response
         end
-
-        break if response
+        response
       end
-      response
     end
 
     def build_request_body(email)
