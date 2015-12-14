@@ -60,6 +60,7 @@ module Autodiscover
 
       @tracer = options.fetch(:tracer, DEFAULT_TRACER)
 
+      @attempted_credentials = Hash.new
       @redirect_count = 0
     end
 
@@ -67,7 +68,10 @@ module Autodiscover
     # available on an authenticated endpoint determined by the
     # specified Credentials object.
     def get_services(credentials, reset_redirect_count=true)
-      @redirect_count = 0 if reset_redirect_count
+      if reset_redirect_count
+        @attempted_credentials = Hash.new
+        @redirect_count = 0
+      end
 
       log.ndc.scope(credentials.email) do
         @tracer.call("Discovering EWS URL for #{credentials.email}") do
@@ -130,8 +134,19 @@ module Autodiscover
     def try_secure_url(url, credentials, req_body)
       log.info { "Trying secure URL=#{url}" }
 
+      @tracer.call("Trying #{url}")
+
+      credentials_key = "#{url}::#{credentials.email}"
+
+      if @attempted_credentials[credentials_key]
+        log.info { "Already failed for URL=#{url}" }
+        @tracer.call("Already attempted")
+        return nil
+      end
+
+      @attempted_credentials[credentials_key] = true
+
       begin
-        @tracer.call("Trying #{url}")
         @http.set_auth(url, credentials.email, credentials.password)
         response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'})
       rescue => e
