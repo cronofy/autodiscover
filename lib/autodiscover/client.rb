@@ -273,7 +273,7 @@ module Autodiscover
     def try_dns_serv_records(credentials, req_body)
       log.info { "Entering #try_dns_serv_records" }
 
-      @tracer.call("Trying DNS records for #{credentials.smtp_domain}") do
+      @tracer.call("Trying SRV DNS records for #{credentials.smtp_domain}") do
         require 'ostruct'
 
         output =
