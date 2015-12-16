@@ -295,7 +295,7 @@ module Autodiscover
         response = nil
 
         if srv_records.empty?
-          @tracer.call("No DNS records found for #{credentials.smtp_domain}")
+          @tracer.call("No SRV DNS records found for #{credentials.smtp_domain}")
         end
 
         srv_records.each do |srv|
