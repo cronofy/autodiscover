@@ -28,6 +28,7 @@ require 'hatchet'
 module Autodiscover
   REDIRECT_LIMIT = 10  # attempts
   CONNECT_TIMEOUT_DEFAULT = 10  # seconds
+  OFFICE_365_AUTODISCOVER_URL = "http://autodiscover.outlook.com/autodiscover/autodiscover.xml"
 
   # Client objects are used to make queries to the autodiscover server, to
   # specify configuration values, and to maintain state between requests.
@@ -79,7 +80,8 @@ module Autodiscover
 
           try_standard_secure_urls(credentials, req_body) ||
           try_standard_redirection_url(credentials, req_body) ||
-          try_dns_serv_records(credentials, req_body)
+          try_dns_srv_records(credentials, req_body) ||
+          try_dns_mx_records(credentials, req_body)
         end
       end
     end
@@ -109,8 +111,13 @@ module Autodiscover
     end
 
     def try_redirection_url(url, credentials, req_body)
+      @tracer.call("Trying redirection URL #{url}") do
+        try_redirection_url_imp(url, credentials, req_body)
+      end
+    end
+
+    def try_redirection_url_imp(url, credentials, req_body)
       log.info { "Trying redirection URL=#{url}" }
-      @tracer.call("Trying redirection URL #{url}")
       @debug_dev << "AUTODISCOVER: looking for redirect from #{url}\n" if @debug_dev
 
       response = @http.get(url) rescue nil
@@ -132,9 +139,13 @@ module Autodiscover
     end
 
     def try_secure_url(url, credentials, req_body)
-      log.info { "Trying secure URL=#{url}" }
+      @tracer.call("Trying #{url}") do
+        try_secure_url_imp(url, credentials, req_body)
+      end
+    end
 
-      @tracer.call("Trying #{url}")
+    def try_secure_url_imp(url, credentials, req_body)
+      log.info { "Trying secure URL=#{url}" }
 
       credentials_key = "#{url}::#{credentials.email}"
 
@@ -236,9 +247,38 @@ module Autodiscover
       get_services(credentials, false)
     end
 
+    MxRecord = Struct.new(:priority, :target) do
+      OFFICE_365_TLD = ".mail.protection.outlook.com"
+
+      def self.type
+        "MX"
+      end
+
+      def self.parse(record)
+        parts = record.split(' ')
+        self.new(parts[1].to_i, parts[2].sub(/\.\Z/, ''))
+      end
+
+      def office_365?
+        target.end_with?(OFFICE_365_TLD)
+      end
+
+      def <=>(other)
+        self.sort_attributes <=> other.sort_attributes
+      end
+
+      def sort_attributes
+        [self.priority, self.target]
+      end
+    end
+
     SrvRecord = Struct.new(:priority, :weight, :port, :target) do
       HTTP_PORT_NUMBER = 80
       HTTPS_PORT_NUMBER = 443
+
+      def self.type
+        "SRV"
+      end
 
       def self.parse(record)
         parts = record.split(' ')
@@ -258,7 +298,7 @@ module Autodiscover
       end
 
       def sort_attributes
-        [self.port_priority, self.priority, -self.weight]
+        [self.port_priority, self.priority, -self.weight, self.target]
       end
 
       def port_priority
@@ -270,25 +310,11 @@ module Autodiscover
       end
     end
 
-    def try_dns_serv_records(credentials, req_body)
-      log.info { "Entering #try_dns_serv_records" }
+    def try_dns_srv_records(credentials, req_body)
+      log.info { "Entering #try_dns_srv_records" }
 
       @tracer.call("Trying SRV DNS records for #{credentials.smtp_domain}") do
-        require 'ostruct'
-
-        output =
-          begin
-            `dig +trace +short -t srv _autodiscover._tcp.#{credentials.smtp_domain}`
-          rescue => e
-            log.warn "Error in #try_dns_serv_records smtp_domain=#{credentials.smtp_domain} - #{e.message}", e
-            ''
-          end
-
-        srv_records = output.split("\n")
-          .map(&:strip)
-          .select { |line| line =~ /\ASRV/ }
-          .map    { |line| SrvRecord.parse(line) }
-          .each   { |srv| log.info { "Found #{srv.inspect}" } }
+        srv_records = dig(SrvRecord, "_autodiscover._tcp.#{credentials.smtp_domain}")
           .select { |srv| srv.https? or srv.http? }
           .sort
 
@@ -300,21 +326,66 @@ module Autodiscover
 
         srv_records.each do |srv|
           log.info { "Trying SRV #{srv.inspect}" }
-          @tracer.call("Trying SRV DNS record for #{srv.target}")
-
-          if srv.https?
-            url = "https://#{srv.target}/autodiscover/autodiscover.xml"
-            @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
-            response = try_secure_url(url, credentials, req_body)
-          else
-            url = "http://#{srv.target}/autodiscover/autodiscover.xml"
-            response = try_redirection_url(url, credentials, req_body)
+          @tracer.call("Trying SRV DNS record for #{srv.target}, port #{srv.port}") do
+            if srv.https?
+              url = "https://#{srv.target}/autodiscover/autodiscover.xml"
+              @debug_dev << "AUTODISCOVER: trying #{url}\n" if @debug_dev
+              response = try_secure_url(url, credentials, req_body)
+            else
+              url = "http://#{srv.target}/autodiscover/autodiscover.xml"
+              response = try_redirection_url(url, credentials, req_body)
+            end
           end
 
           break if response
         end
         response
       end
+    end
+
+    def try_dns_mx_records(credentials, req_body)
+      log.info { "Entering #try_dns_mx_records" }
+
+      @tracer.call("Checking MX DNS records for #{credentials.smtp_domain} for Office 365") do
+        mx_records = dig(MxRecord, credentials.smtp_domain)
+
+        response = nil
+
+        if mx_records.empty?
+          @tracer.call("No MX DNS records found for #{credentials.smtp_domain}")
+        end
+
+        mx_records.each do |mx|
+          log.info { "Trying MX #{mx.inspect}" }
+          @tracer.call("Trying MX DNS record for #{mx.target}") do
+            if mx.office_365?
+              @tracer.call("Recognized as an Office 365 domain")
+              response = try_redirection_url(OFFICE_365_AUTODISCOVER_URL, credentials, req_body)
+              break
+            else
+              @tracer.call("Not recognized as an Office 365 domain")
+            end
+          end
+        end
+
+        response
+      end
+    end
+
+    def dig(record_class, domain)
+      output =
+        begin
+          `dig +trace +short -t #{record_class.type} #{domain}`
+        rescue => e
+          log.warn "Error in #dig(record_class=#{record_class}, domain=#{domain}) - #{e.message}", e
+          ''
+        end
+
+      output.split("\n")
+        .map(&:strip)
+        .select { |line| line.start_with?(record_class.type) }
+        .map    { |line| record_class.parse(line) }
+        .each   { |record| log.info { "Found #{record.inspect}" } }
     end
 
     def build_request_body(email)
