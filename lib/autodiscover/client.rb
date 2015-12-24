@@ -174,7 +174,7 @@ module Autodiscover
       log.debug { response.header.all.inspect }
       log.debug { response.content }
 
-      if response.status_code == 302
+      if [301, 302].include?(response.status_code)
         try_redirect_url(response.header['Location'].first, credentials, req_body)
       elsif HTTP::Status.successful?(response.status_code)
         result = parse_response(response.content)
