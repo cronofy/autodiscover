@@ -468,7 +468,8 @@ module Autodiscover
 
     def parse_xml(doc)
       Nokogiri::XML(doc) { |c| c.options = Nokogiri::XML::ParseOptions::STRICT }
-    rescue Nokogiri::XML::SyntaxError
+    rescue => e
+      log.warn "#parse_xml(doc) failed - #{e.class} - #{e.message}", e
       nil
     end
   end
