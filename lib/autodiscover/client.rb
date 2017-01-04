@@ -435,8 +435,9 @@ module Autodiscover
         # Only care about about "EXPR" type protocol configuration values
         # for accessing Exchange services outside of the firewall
         settings = {}
+
         if protocol_e = account_e.at_xpath('o:Protocol[o:Type="EXPR"]', NAMESPACES)
-          log.info { "protocol settings found - #{protocol_e}" }
+          log.info { "EXPR protocol settings found - #{protocol_e}" }
           # URL for the Web services virtual directory.
           ews_url_e = protocol_e.at_xpath('o:EwsUrl', NAMESPACES)
           settings['ews_url'] = ews_url_e.content if ews_url_e
@@ -445,6 +446,22 @@ module Autodiscover
           ttl_e = protocol_e.at_xpath('o:TTL', NAMESPACES)
           settings['ttl'] = ttl_e ? ttl_e.content : 1
         end
+
+        if settings['ews_url'].nil? || settings['ews_url'].strip.empty?
+          log.info { "No EwsUrl found for EXPR protocol - checking EXCH protocol" }
+
+          if protocol_e = account_e.at_xpath('o:Protocol[o:Type="EXCH"]', NAMESPACES)
+            log.info { "EXCH protocol settings found - #{protocol_e}" }
+            # URL for the Web services virtual directory.
+            ews_url_e = protocol_e.at_xpath('o:EwsUrl', NAMESPACES)
+            settings['ews_url'] = ews_url_e.content if ews_url_e
+            # Time to Live (TTL) in hours. Default is 1 hour if no element is
+            # returned.
+            ttl_e = protocol_e.at_xpath('o:TTL', NAMESPACES)
+            settings['ttl'] = ttl_e ? ttl_e.content : 1
+          end
+        end
+
         Autodiscover::Services.new(settings)
       when /^redirectAddr$/i
         log.info { "redirectAddr action content - #{action_e}" }
