@@ -32,13 +32,17 @@ module Autodiscover
     # A value of zero indicates that rediscovery is not required.
     attr_reader :ttl
 
+    # The version of the exchange server
+    attr_reader :server_version
+
     def initialize(settings)  #:nodoc:
       @ews_url = settings['ews_url']
       @ttl = settings['ttl']
+      @server_version = ServerVersionParser.new(settings['server_version'])
     end
 
     def to_s
-      "<#{self.class} - ews_url=#{ews_url}, ttl=#{ttl}>"
+      "<#{self.class} - ews_url=#{ews_url}, ttl=#{ttl}, server_version=#{server_version.to_s}>"
     end
   end
 end
