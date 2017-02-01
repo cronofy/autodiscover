@@ -24,3 +24,4 @@
 require 'autodiscover/client'
 require 'autodiscover/credentials'
 require 'autodiscover/services'
+require 'autodiscover/server_version_parser'
