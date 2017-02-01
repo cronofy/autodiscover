@@ -437,7 +437,7 @@ module Autodiscover
         settings = {}
 
         if protocol_ex = account_e.at_xpath('o:Protocol[o:Type="EXCH"]', NAMESPACES)
-          log.info { "EXPH protocol settings found - #{protocol_ex}" }
+          log.info { "EXCH protocol settings found - #{protocol_ex}" }
 
           server_version = protocol_ex.at_xpath('o:ServerVersion', NAMESPACES)
           settings['server_version'] = server_version.content.to_s if server_version
