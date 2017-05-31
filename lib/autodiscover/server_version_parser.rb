@@ -42,8 +42,11 @@ module Autodiscover
     end
 
     def to_s
-      "#{exchange_version} - #{major}.#{minor}.#{build}"
+      begin
+        "#{exchange_version} - #{major}.#{minor}.#{build}"
+      rescue
+        "#{@version} - inspection failed"
+      end
     end
-
   end
 end
