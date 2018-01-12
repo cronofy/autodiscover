@@ -158,6 +158,8 @@ module Autodiscover
       @attempted_credentials[credentials_key] = true
 
       begin
+        log.info { "Trying secure URL=#{url} with email=#{credentials.email}" }
+        @tracer.call("Authenticating using email=#{credentials.email}")
         @http.set_auth(url, credentials.email, credentials.password)
         response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'})
       rescue => e
@@ -168,6 +170,28 @@ module Autodiscover
         @tracer.call("No response received from #{url}")
         log.info { "No response received from #{url}" }
         return nil
+      end
+
+      if ([301, 302].include?(response.status_code) || HTTP::Status.successful?(response.status_code))
+        # Valid response
+      else
+        @tracer.call("Failed (status: #{response.status_code})")
+        return nil unless credentials.username
+
+        begin
+          log.info { "Trying secure URL=#{url} with username=#{credentials.username}" }
+          @tracer.call("Authenticating using username=#{credentials.username}")
+          @http.set_auth(url, credentials.username, credentials.password)
+          response = @http.post(url, req_body, {'Content-Type' => 'text/xml; charset=utf-8'})
+        rescue => e
+          log.info { "Failed trying secure URL=#{url} - #{e.class} - #{e.message}" }
+        end
+
+        unless response
+          @tracer.call("No response received from #{url}")
+          log.info { "No response received from #{url}" }
+          return nil
+        end
       end
 
       log.info { "Status code #{response.status_code} from #{url}" }
