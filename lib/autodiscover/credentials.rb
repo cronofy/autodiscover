@@ -31,12 +31,16 @@ module Autodiscover
     # Password for the account.
     attr_reader :password
 
+    # Username for the user.
+    attr_reader :username
+
     # SMTP domain determined by the e-mail address.
     attr_reader :smtp_domain  #:nodoc:
 
-    def initialize(address, password)
-      self.email = address
-      @password = password
+    def initialize(args = {})
+      self.email = args[:email]
+      @password = args[:password]
+      @username = args[:username]
     end
 
     def email=(address)  #:nodoc:
