@@ -57,6 +57,7 @@ module Autodiscover
 
       @http = HTTPClient.new
       @http.connect_timeout = options[:connect_timeout] || CONNECT_TIMEOUT_DEFAULT
+      @http.default_header['User-Agent'] = options[:user_agent] if options[:user_agent]
       @http.debug_dev = @debug_dev if @debug_dev
 
       @tracer = options.fetch(:tracer, DEFAULT_TRACER)
